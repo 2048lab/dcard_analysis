@@ -1,0 +1,241 @@
+---
+title: "fathering"
+author: "Jilung Hsieh"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setups
+
+```{r pkgs}
+library(tidyverse)
+options(stringsAsFactors = F)
+library(lubridate)
+library(jiebaR)
+
+watched.years <- c("2011-01-01", "2012-01-01", "2013-01-01", 
+             "2014-01-01", "2015-01-01", "2016-01-01",
+             "2017-01-01", "2018-01-01", "2019-01-01")
+watched.dates <- c("2017-02-20", "2017-05-24", "2018-11-24", "2019-05-24")
+watched.parade <- c("2018-10-27", "2017-10-27")
+```
+
+```{r jieba}
+stopWords <- readRDS("../../R/lib/stopWords.rds")
+segment_not <- c("蔡英文")
+watched <- c("爸爸","父親","老公","先生","丈夫","奶爸","寶爸","隊友",
+             "爹地","爸比","把拔","把鼻","老爸","另一半","拔拔",
+             "孩子的爸","孩子爸", "爸拔","他爸","她爸","新手爸","版爸",
+             "板爸","我家男人","當爸的","腦公","阿爸","人父","孩子的爹",
+             "孩子爹","老爹","外子","拔比","爸鼻","爸把","爸逼","爸咪",
+             "把爸","拔爸","爹低","帥爸","準爸","小孩爸","親爸","神爸",
+             "宅爸","瓶餵爸","寶寶的爸","孩的爸","女兒的爸")
+cutter <- worker()
+watched.str <- paste0(watched, collapse = "|")
+new_user_word(cutter, segment_not)
+new_user_word(cutter, watched)
+
+```
+
+```{r loading-data}
+load("../pttdata/boards/BabyMother_20220305.rda")
+Sys.setlocale("LC_ALL", "C") # Change to C to parse time correctly
+
+# Testing of resolve R timestamp
+# Sys.getlocale()
+# allp.df$ptime[[1]] 
+# as.POSIXct(strptime(allp.df$ptime[[1]], "%a %b %e %X %Y"))
+# Sys.setlocale("LC_ALL", "C") # Change to C to parse time correctly
+
+
+# glimpse(allc.df)
+```
+
+# --- POST ---
+
+# Cleaning data
+
+```{r cleaning}
+filtered.df <- allp.df %>% 
+    mutate(pcontent = str_replace_all(pcontent, " ", "")) %>% # avoid to replace new line mark
+    # mutate(pcontent = str_replace_all(pcontent, "\\s", "")) %>% 
+    mutate(pcontent = str_replace_all(pcontent, "\n+|\r+", "\n")) %>%
+    mutate(ptime = as.POSIXct(strptime(ptime, "%a %b %e %X %Y"))) %>%
+    mutate(poster = str_replace(poster, "(.+?) \\(.*\\)", "\\1")) %>%
+    mutate(nchar = nchar(pcontent)) %>%
+    mutate(fathering = if_else(str_detect(pcontent, watched.str), "father", "none")) %>%
+    mutate(doc_id = str_replace(plink, ".*/([a-zA-Z\\.0-9]+)\\..*", "\\1"))
+
+
+glimpse(filtered.df) %>% head %>% View
+
+```
+
+```{r filter-by-timeline}
+filtered.df <- filtered.df %>%
+    filter(year(ptime) >= 2014) %>%
+    filter(str_detect(pcontent, watched.str)) %>%
+    filter(!str_detect(pcontent, "\\[公告\\]"))
+
+filtered.df %>%
+    ggplot() + aes(x=as.POSIXct(ptime), fill=fathering) + 
+    geom_density(alpha=0.5)
+
+table(is.na(allp.df$ptime))
+
+as.Date("2015-09-01")
+
+
+library(ggrepel)
+filtered.df %>%
+    mutate(week = cut(ptime, breaks = "month")) %>%
+    count(week, fathering) %>% # glimpse # View #2015-09-01
+    ggplot(aes(x=as.POSIXct(week), y=n, fill=fathering)) + 
+    geom_col() + 
+    # geom_vline(xintercept = as.numeric(as.POSIXct(watched.years)),
+    # color="royalblue",linetype = "dotted", size=0.5) + 
+    # geom_vline(xintercept = as.numeric(as.POSIXct(watched.dates)),
+    # color="tomato", alpha=1) + 
+    # geom_text_repel(
+    #     aes(label = "2015-09-01", x = as.POSIXct("2015-09-01"), y=1000),
+    #     size = 5,
+    #     box.padding = unit(0.35, "lines"),
+    #     point.padding = unit(0.3, "lines")
+    #     ) + 
+    xlab("week") + theme_minimal()
+
+
+```
+
+```{r dump-to-sheets}
+library(googlesheets4)
+ss <- gs4_create("fathering", sheets = slice(father.df, 1:3))
+
+library(writexl)
+write_xlsx(father.df,
+           path = "father.xlsx",
+           col_names = TRUE,
+           format_headers = TRUE,
+           use_zip64 = FALSE
+)
+
+# print(father.df$pcontent[[5]])
+```
+
+```{r}
+Sys.setlocale(locale="zh_TW.UTF-8")
+```
+
+# Segment to sentences
+
+```{r}
+linebreaks <- filtered.df %>%
+    mutate(sentence = str_split(pcontent, "\n")) %>%
+    unnest(sentence) %>%
+    mutate(nchar = nchar(sentence))
+```
+
+```{r}
+merged <- list()
+j <- 1
+i <- 1
+current <- linebreaks %>% slice(1)
+while(i < (nrow(linebreaks)-1)){
+# while(i < 100){
+    if(linebreaks$nchar[[i]] >= 39){
+        current$sentence[[1]] <- paste0(current$sentence[[1]],
+                                        linebreaks$sentence[[i+1]])
+    }
+    else{
+        merged[[j]] <- current
+        j <- j + 1
+        current <- linebreaks %>% slice(i+1)
+    }
+    i <- i + 1
+    if(i %% 1000 == 0){
+        message(i)
+    }
+}
+
+paragraph.df <- bind_rows(merged)
+```
+
+```{r save-to-rda, eval=FALSE, include=FALSE}
+save(paragraph.df, file="paragraph.rda")
+
+```
+
+# --- SEPERATION ---
+
+```{r}
+load("paragraph.rda")
+
+
+paragraph.cleaned <- paragraph.df %>%
+    select(doc_id, ptitle, sentence) %>%
+    mutate(alphanum = str_replace_all(sentence, "[[:punct:]]|[-◆~　=><$	
+↑◤◣+♥～￣一▼™ミ∕→★∣▇─┐]|[a-zA-Z0-9]", "")) %>%
+    mutate(alphanum_len = nchar(alphanum)) %>%
+    filter(alphanum_len > 4) %>%
+    select(-alphanum, -alphanum_len)
+
+sentences <- paragraph.cleaned %>%
+    mutate(sentence = str_split(sentence, "[。；！!]")) %>%
+    unnest(sentence) %>%
+    mutate(nchar = nchar(sentence)) %>%
+    filter(nchar > 3) %>%
+    group_by(doc_id) %>%
+    mutate(sid = paste0(doc_id, "_", row_number())) %>%
+    ungroup()
+
+# save(sentences, file = "sentence.rda")
+```
+
+## Building ternary
+
+```{r}
+
+# load("sentence.rda")
+
+s3.watched <- sentences %>%
+    mutate(next_s = lead(sentence)) %>%
+    mutate(prev_s = lag(sentence)) %>%
+    drop_na() %>%
+    filter(str_detect(sentence, watched.str)) %>%
+    mutate(s3 = paste0(prev_s, "。", sentence, "。", next_s)) %>%
+    mutate(s3 = str_replace_all(s3, "。。", "。")) %>%
+    mutate(nchar = nchar(s3)) %>%
+    filter(nchar > 5)
+```
+
+## Retrieve only Chinese and Chinese punctuation
+
+```{r}
+zh_pad <- '[\\p{Han}！？｡。，、]'
+s3.watched <- s3.watched %>% 
+    mutate(sentence = str_replace_all(sentence, ",", "，")) %>%
+    mutate(sentence = purrr::map(sentence, 
+                                 function(x)paste0(str_extract_all(x, 
+                                                                   zh_pad,
+                                                                   simplify = T), 
+                                                   collapse = ""))) %>% 
+    mutate(s3 = purrr::map(s3, 
+                                 function(x)paste0(str_extract_all(x, zh_pad, simplify = T), collapse = "")))
+```
+
+```{r save-to-rda-excel}
+
+save(s3.watched, file="s3_watched.rda")
+
+s3.watched %>%
+    writexl::write_xlsx("s3_fathering_relevant.xlsx")
+
+s3.watched %>% head() %>% .$s3
+s3.watched %>%
+    select(ptitle, sentence, s3) %>% head(100) %>% View
+
+```

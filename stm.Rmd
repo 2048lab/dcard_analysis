@@ -1,0 +1,143 @@
+---
+title: "STM"
+author: "Jilung Hsieh"
+date: "`r Sys.Date()`"
+output: 
+  html_document: 
+    toc: yes
+    highlight: zenburn
+    fig_width: 8
+    fig_height: 4
+    fig_caption: yes
+    df_print: tibble
+    params:
+        output_dir:"html"
+---
+
+# STM Tutorials
+
+-   <https://juliasilge.com/blog/sherlock-holmes-stm/>
+-   [RPubs - stm_course](https://rpubs.com/Rawrion/669023)
+
+# Setups
+
+```{r loading-pkgs}
+pkgs <- c("LDAvis", "tidyverse", "jiebaR", "igraph", "stm", "wordcloud")
+install.packages(pkgs[!pkgs %in% installed.packages()]) 
+library(tidyverse)
+library(tidyr) 
+options(scipen = 999)
+```
+
+```{r}
+load("data/s3_watched.rda")
+Sys.setlocale(locale="zh_TW.UTF-8")
+
+```
+
+```{r initial-jieba}
+library(jiebaR)
+stopWords <- readRDS("data/stopWords.rds")
+segment_not <- c("爸爸", "爸媽", "新手")
+watched <- c("爸爸","父親","老公","先生","丈夫","奶爸","寶爸","隊友",
+             "爹地","爸比","把拔","把鼻","老爸","另一半","拔拔",
+             "孩子的爸","孩子爸", "爸拔","他爸","她爸","新手爸","版爸",
+             "板爸","我家男人","當爸的","腦公","阿爸","人父","孩子的爹",
+             "孩子爹","老爹","外子","拔比","爸鼻","爸把","爸逼","爸咪",
+             "把爸","拔爸","爹低","帥爸","準爸","小孩爸","親爸","神爸",
+             "宅爸","瓶餵爸","寶寶的爸","孩的爸","女兒的爸")
+
+reserved <- c("神隊友", "豬隊友", "好隊友", "好先生", "好爸爸", "好老公")
+
+watched <- c(watched, reserved)
+
+watched.str <- paste0(watched, collapse = "|")
+
+
+reserved <- c("神隊友", "豬隊友", "好隊友", "好先生", "好爸爸", "好老公")
+
+cutter <- worker()
+tagger <- worker("tag")
+new_user_word(cutter, segment_not)
+new_user_word(cutter, watched)
+new_user_word(tagger, segment_not)
+new_user_word(tagger, watched)
+```
+
+# Pre-processing
+
+## Tokenization
+
+```{r}
+unnested.df <- s3.watched %>%
+    # filter(str_detect(sentence, "隊友")) %>%
+    mutate(word = purrr::map(s3, function(x)segment(x, cutter))) %>%
+    unnest(word) %>%
+    anti_join(stopWords) %>%
+    filter(!str_detect(word, "[a-zA-Z0-9]+")) %>%
+    filter(!is.na(word)) %>%
+    group_by(word) %>%
+    filter(n() > 5) %>%
+    ungroup() %>%
+    filter(nchar(word) > 1)
+```
+
+## Building dfm
+
+```{r dfm}
+library(tidytext)
+# library(quanteda)
+dfm <- unnested.df %>%
+    count(doc_id, word, sort = TRUE) %>%
+    cast_dfm(doc_id, word, n) #tidytext
+```
+
+# STM
+
+```{r stm}
+library(stm)
+topic_model <- stm(dfm, K = 12, verbose = F)
+save(topic_model, file="output/tm02_s3_k12.rda")
+load("output/tm02_s3_k12.rda")
+```
+
+```{r summary-of}
+summary(topic_model)
+# print(topic_model)
+```
+
+```{r topic-corr}
+library(igraph)
+mod.out.corr <- topicCorr(topic_model)
+# install.packages("wordcloud")
+
+cloud(topic_model, topic = 7, scale = c(4,.5), family = "Heiti TC Light")
+
+plot(mod.out.corr)
+mod.out.corr
+```
+
+## LDAvis
+
+See Sievert, C., & Shirley, K. (2014). LDAvis: A method for visualizing and interpreting topics. *Proceedings of the Workshop on Interactive Language Learning, Visualization, and Interfaces*. Proceedings of the Workshop on Interactive Language Learning, Visualization, and Interfaces, Baltimore, Maryland, USA. <https://doi.org/10.3115/v1/w14-3110>
+
+1.  saliency(term w) = frequency(w) \* [sum_t p(t \| w) \* log(p(t \| w)/p(t))] for topics t; see Chuang et. al (2012)
+
+<!-- -->
+
+2.  relevance(term w \| topic t) = λ \* p(w \| t) + (1 - λ) \* p(w \| t)/p(w); see Sievert & Shirley (2014). Lift: p(w\|t)/p(w) = p(w and t)/(p(w)p(t))
+
+```{r toLDAvis}
+stm.doc <- quanteda::convert(dfm, to = "stm")
+toLDAvis(topic_model, stm.doc$documents)
+```
+
+```{r}
+# topics <- c("隊友", "生產經驗", "Mothering", "大寶",
+#             "先生", "夫妻之間", "神隊友", "好隊友", "豬隊友", 
+#             "育兒溝通", "婆婆", "爸爸")
+labelTopics(topic_model)
+??labelTopics 
+findThoughts(topic_model)
+??findThoughts
+```

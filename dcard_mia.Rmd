@@ -1,0 +1,271 @@
+---
+title: "dcard_scraper"
+author: "Jilung Hsieh"
+date: "`r Sys.Date()`"
+---
+
+
+## Import pkgs
+
+```{r}
+Sys.setlocale(category = "LC_ALL", locale = "cht")
+library(tidyverse)
+library(rvest)
+library(httr)
+library(jsonlite)
+library(lubridate)
+library(curl)
+```
+
+# Scraper
+## Detect last page
+
+```{r}
+url_latest = "https://www.dcard.tw/f/relationship?latest=true"
+html = url_latest %>% read_html()
+link = html %>% html_nodes(".bJQtxM") %>% html_attr("href")
+latest_id = link[1] %>% str_remove("/f/relationship/p/")
+
+```
+
+```{r}
+##### latest data
+
+url = str_c("https://www.dcard.tw/service/api/v2/forums/relationship/posts?limit=30&before=")
+
+df_dcard <- tibble()
+
+index_now <- 1
+i <- index_now
+
+for (i in index_now:1) {
+    df_dcard_tmp <- url %>% str_c(latest_id) %>%
+        GET() %>% content("text", encoding = "utf-8") %>%
+        fromJSON() %>% as_tibble() 
+    #%>% select(id, forumAlias, title, excerpt, createdAt, likeCount, commentCount, school, forumName)
+  
+    df_dcard <- df_dcard %>% bind_rows(df_dcard_tmp)
+    message(i, " , id = ", latest_id)
+    latest_id <- df_dcard_tmp %>% slice(30) %>% pull(id)
+    Sys.sleep(10)
+}
+
+#有時候沒辦法撈多於30篇
+Sys.sleep(30)
+
+df_dcard %>% write_rds(str_c("df_dcard", Sys.Date(), ".rds"))
+```
+
+# EXPLORER
+
+```{r load-saved-rds}
+df_dcard <- read_rds("alldata.rds")
+```
+
+```{r initialize-jieba}
+# install.packages("jiebaR")
+library("jiebaR")
+
+stopWords <- readRDS("stopWords.rds")
+segment_not<-c("劈腿","戴綠帽","出軌","變心","抓包","負心","小三","小王","渣男","抓姦","背叛")
+
+cutter <- worker()
+tagger <- worker("tag")
+new_user_word(cutter, segment_not)
+new_user_word(tagger, segment_not)
+
+watched <- c("劈腿","綠帽","出軌","變心","原諒","抓包","承認","負心","渣男","戴綠帽","抓姦","小三","小王","鬼迷心竅","愧疚","偷吃")
+watched.str <- paste0(watched, collapse = "|")
+
+```
+
+
+
+
+```{r cleaning-Mia}
+
+#  Be careful! "filter" is a reserved word, shouldn't as variable name
+#資料清理
+filtered <- df_dcard %>% 
+  type_convert() %>% # readr
+  mutate(doc_id = as.character(id)) %>%
+  distinct(doc_id, .keep_all = T) %>%
+  mutate(excerpt = str_replace_all(excerpt," ","")) %>%
+  mutate(excerpt = str_replace_all(excerpt, "\n+|\r+", "\n"))%>%
+  mutate(excerpt = str_replace_all(excerpt, 
+                                   "[－—]|[-◆~　=><$↑◤◣+♥～￣一▼™ミ∕→★∣▇─┐]", 
+                                   "")) %>%
+  mutate(nchar = nchar(excerpt))%>%
+  filter(nchar > 5) %>%
+  mutate(cheat = if_else(str_detect(excerpt, watched.str), "cheat", "none"))
+  
+
+filtered %>% count(cheat)
+```
+
+```{r density with timeline}
+#畫出發文頻率分布圖
+filtered %>%
+  ggplot() + aes(x=createdAt, fill=cheat) + 
+  geom_density(alpha=0.5)
+
+#想畫bar chart，但是中間不知道為什麼會斷掉
+library(ggrepel)
+filtered %>%
+    mutate(hour = cut(createdAt, breaks = "day")) %>%
+    count(hour, cheat) %>%
+    ggplot(aes(x=as.POSIXct(hour), y=n, fill=cheat)) + 
+    geom_col() +
+    xlab("time") + theme_minimal()
+
+```
+
+```{r hashtag}
+#統計hashtag
+filtered %>%
+  unnest(topics) %>%
+  count(topics, sort=T) %>% 
+  head(10)
+
+```
+
+
+# TOKENIZATION
+```{r tokenization-proc}
+#詞性分析與統計
+unnested.df <- filtered %>%
+    mutate(word = purrr::map(excerpt, function(x)segment(x, tagger))) %>% 
+    select(doc_id, word) %>%
+    mutate(word = purrr::map(word, function(x)str_c(names(x), "_", x))) %>% 
+    unnest(word) %>% 
+    separate(word, c("pos", "word"), sep = "_") %>% 
+    anti_join(stopWords) %>%
+    # filter(!(word %in% stopWords$word)) %>%
+    filter(!str_detect(word, "[a-zA-Z0-9]+"))
+
+#word frequency
+unnested.df %>%    
+    count(word, sort = T) %>%
+    count(n, sort = T) %>%
+    ggplot() + 
+    aes(n, nn) + 
+    geom_jitter(color = "black", alpha = 0.4) + 
+    scale_x_log10() + 
+    scale_y_log10()
+```
+
+```{r word-freq, fig.asp = 1, fig.width=4}
+#詞彙出現次數bar chart
+unnested.df %>%
+    filter(nchar(word) > 1) %>%
+    filter(!str_detect(word, "[a-zA-Z0-9]+")) %>%
+    count(word, sort = T) %>%
+    slice(1:50) %>%
+    mutate(word = reorder(word, n)) %>%
+    ggplot() + 
+    aes(word, n) + 
+    geom_col() + 
+    coord_flip() + 
+    theme(axis.text.y = element_text(family="Heiti TC Light"))
+```
+
+
+```{r}
+#可以過濾掉一些不重要的詞??
+unnested.df %>%
+    count(doc_id, pos, sort = T) %>% head(20)
+```
+
+## tf-idf
+
+```{r tf-idf}
+#算出一篇裡面最重要的詞
+library(tidytext) # for bind_tf_idf
+doc_tfidf_top5 <- unnested.df %>%
+    group_by(word) %>%
+    filter(n() > 10) %>%
+    ungroup() %>%
+    count(doc_id, word) %>% 
+    bind_tf_idf(word, doc_id, n) %>%
+    group_by(doc_id) %>%
+    arrange(desc(tf_idf)) %>%
+    slice(1:5) %>%
+    ungroup()
+
+doc_tfidf_top5 %>%
+  count(word, sort = T) %>%
+  slice(1:30) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot() + aes(word, n) + 
+  geom_col() + 
+  coord_flip() +
+  theme(text = element_text(family="Heiti TC Light"))
+
+
+```
+
+
+# (Option) Sentences
+
+```{r}
+# 這裡本來可以跑，但後來一直沒有辦法跑出sentences，會出現unexpected symbol in:
+# 你不小心多拿走一個括號
+sentences <- filtered %>%
+  mutate(sentence = str_split(excerpt, "[。；！!]"))%>%
+  unnest(sentence)%>%
+  filter(nchar(sentence) > 5)
+           
+         
+```
+
+
+
+```
+#斷詞
+# YOU DONT NEED THIS PART
+# merged <- list()
+# j <- 1
+# i <- 1
+# current <- sentences %>% slice(1)
+# 
+# while(i < (nrow(sentences)-1)){
+#     if(sentences$nchar[[i]] >= 37){
+#         current$sentence[[1]] <- paste0(current$sentence[[1]],
+#                                         sentences$sentence[[i+1]])
+#     }
+#     else{
+#         merged[[j]] <- current
+#         j <- j + 1
+#         current <- sentences %>% slice(i+1)
+#     }
+#     i <- i + 1
+#     if(i %% 1000 == 0){
+#         message(i)
+#     }
+# }
+# merged.df <- bind_rows(merged)
+
+```
+
+
+```{r}
+cleaned <- merged.df %>%
+    mutate(alphanum = str_replace_all(sentence, "[[:punct:]]|[-◆~　=><$	
+↑◤◣+♥～￣一▼™ミ∕→★∣▇─┐]|[a-zA-Z0-9]", "")) %>%
+    mutate(alphanum_len = nchar(alphanum)) 
+
+sentences <- cleaned %>%
+    select(title,createdAt , sentence) %>%
+    mutate(sentence = str_split(sentence, "[。；！!]"))  %>% unnest(sentence)
+
+ternary <- sentences %>%
+    mutate(next_s = lead(sentence)) %>%
+    mutate(prev_s = lag(sentence)) %>%
+    drop_na() %>%
+    filter(str_detect(sentence, watched.str)) %>%
+    mutate(s3 = paste0(prev_s, "。", sentence, "。", next_s)) %>%
+    mutate(s3 = str_replace_all(s3, "。。", "。")) %>%
+    mutate(nchar = nchar(s3))
+
+
+```

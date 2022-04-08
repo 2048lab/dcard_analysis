@@ -1,0 +1,83 @@
+---
+title: "dcard_scraper"
+author: "Jilung Hsieh"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import pkgs
+
+```{r}
+library(tidyverse)
+library(rvest)
+library(httr)
+library(jsonlite)
+library(lubridate)
+library(curl)
+```
+
+## Detect last page
+
+```{r}
+url_latest = "https://www.dcard.tw/f/relationship?latest=true"
+html = url_latest %>% read_html()
+link = html %>% html_nodes(".bJQtxM") %>% html_attr("href")
+latest_id = link[1] %>% str_remove("/f/relationship/p/")
+
+```
+
+```{r}
+
+##### latest data
+
+url = str_c("https://www.dcard.tw/service/api/v2/forums/relationship/posts?limit=50&before=")
+
+df_dcard <- tibble()
+
+index_now <- 1
+i <- index_now
+
+for (i in index_now:30) {
+    df_dcard_tmp <- url %>% str_c(latest_id) %>%
+        GET() %>% content("text", encoding = "utf-8") %>%
+        fromJSON() %>% as_tibble() 
+    #%>% select(id, forumAlias, title, excerpt, createdAt, likeCount, commentCount, school, forumName)
+  
+    df_dcard <- df_dcard %>% bind_rows(df_dcard_tmp)
+    message(i, " , id = ", latest_id)
+    latest_id <- df_dcard_tmp %>% tail(1) %>% pull(id)
+    Sys.sleep(10)
+}
+
+
+
+df_dcard %>% write_rds(str_c("dcard/df_dcard_index_", Sys.time() %>% str_replace_all(":", ""), ".rds"))
+
+tibble(latest_id = latest_id, nrow = nrow(df_dcard), timestamp = Sys.time()) %>%
+    write_csv(file = "dcard/latest_id.csv", append = T)
+```
+
+```{r}
+df_dcard %>%
+    count(id) %>% nrow()
+```
+
+```{r}
+fnames <- list.files("dcard/", pattern="df_dcard.*.rds", full.names = T)
+
+alldata <- fnames %>%
+    purrr::map(function(x)read_rds(x)) %>%
+    bind_rows() %>%
+    type_convert() %>%
+    filter(!duplicated(.))
+
+alldata %>% 
+    ggplot() + aes(createdAt) + geom_density()
+
+alldata %>%
+    save(file="alldata_2m.rda")
+```

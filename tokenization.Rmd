@@ -1,0 +1,234 @@
+---
+title: "Tokenization"
+author: "Jilung Hsieh"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+<https://ggplot2.tidyverse.org/reference/theme.html>
+
+```{r}
+library(tidyverse)
+options(stringsAsFactors = F)
+options(scipen = 999)
+th <- theme(axis.text.y=element_text(family="Heiti TC Light"),
+            axis.text.x=element_text(family="Heiti TC Light"),
+            axis.title.x=element_text(family="Heiti TC Light"),
+            axis.title.y=element_text(family="Heiti TC Light"),
+            legend.text=element_text(family="Heiti TC Light"))
+```
+
+```{r}
+load("s3_watched.rda")
+```
+
+# Tokenization
+
+## Initialize jieba
+
+```{r}
+library(jiebaR)
+stopWords <- readRDS("../../R/lib/stopWords.rds")
+segment_not <- c("爸爸", "爸媽", "新手")
+watched <- c("爸爸","父親","老公","先生","丈夫","奶爸","寶爸","隊友",
+             "爹地","爸比","把拔","把鼻","老爸","另一半","拔拔",
+             "孩子的爸","孩子爸", "爸拔","他爸","她爸","新手爸","版爸",
+             "板爸","我家男人","當爸的","腦公","阿爸","人父","孩子的爹",
+             "孩子爹","老爹","外子","拔比","爸鼻","爸把","爸逼","爸咪",
+             "把爸","拔爸","爹低","帥爸","準爸","小孩爸","親爸","神爸",
+             "宅爸","瓶餵爸","寶寶的爸","孩的爸","女兒的爸", "神隊友", "豬隊友")
+
+cutter <- worker()
+tagger <- worker("tag")
+watched.str <- paste0(watched, collapse = "|")
+new_user_word(cutter, segment_not)
+new_user_word(cutter, watched)
+new_user_word(tagger, segment_not)
+new_user_word(tagger, watched)
+```
+
+```{r}
+
+unnested.df <- s3.watched %>%
+    mutate(word = purrr::map(sentence, function(x)segment(x, cutter))) %>%
+    unnest(word) %>%
+    filter(!(word %in% stopWords)) %>%
+    filter(!str_detect(word, "[a-zA-Z0-9]+")) %>%
+    mutate(word2 = lead(word)) %>%
+    mutate(bigram = paste0(word, "_", word2))
+```
+
+```{r}
+unnested.df %>%
+    count(word, sort = T) %>%
+    filter(word %in% watched) %>%
+    slice(1:100)
+```
+
+```{r}
+unnested.df %>%
+    count(bigram) %>%
+    arrange(desc(n)) %>%
+    slice(1:30)
+```
+
+# Keyness
+
+## Grouping
+
+神隊友:豬隊友 = 384:428
+
+```{r}
+teammate <- unnested.df %>%
+    filter(str_detect(sentence, "神隊友|豬隊友")) %>%
+    mutate(group = if_else(str_detect(sentence, "神隊友"), "神隊友", "豬隊友"))
+
+teammate %>%
+    count(plink, group) %>% 
+    count(group)
+```
+
+## log-ratio
+
+<https://ggplot2.tidyverse.org/reference/theme.html>
+
+```{r}
+
+pf_ratio <- teammate %>%
+    count(group, word) %>%
+    filter(n > 1) %>%
+	spread(group, n, fill = 0) %>%
+    mutate(神ratio = (神隊友+1) / (sum(神隊友) + 1)) %>%
+    mutate(豬ratio = (豬隊友+1) / (sum(豬隊友) + 1)) %>%
+	mutate(logratio = log2(神ratio / 豬ratio)) %>%
+	arrange(desc(logratio))
+
+pf_ratio %>%
+	group_by(logratio > 0) %>%
+	top_n(20, abs(logratio)) %>%
+	ungroup() %>%
+	mutate(word = reorder(word, logratio)) %>%
+	ggplot(aes(word, logratio, fill = logratio < 0)) +
+	geom_bar(stat = "identity") +
+	coord_flip() +
+	ylab("神/豬 log ratio") +
+	scale_fill_manual(name = "", labels = c("神隊友", "豬隊友"),
+		values = c("tomato", "lightblue")) + th
+	
+```
+
+# log-ratio with POS
+
+```{r}
+unnested.pos <- ternary %>%
+    filter(str_detect(sentence, "神隊友|豬隊友")) %>%
+    mutate(group = if_else(str_detect(sentence, "神隊友"), "神隊友", "豬隊友")) %>%
+    mutate(word = purrr::map(sentence, function(x)segment(x, tagger))) %>%
+    mutate(word = purrr::map(word, function(x)str_c(names(x), "_", x))) %>% 
+    unnest(word) %>%
+    separate(word, c("pos", "word")) %>% 
+    filter(!(word %in% stopWords))
+
+unnested.pos %>%
+    count(pos) %>% arrange(desc(n))
+
+unnested.pos %>%
+    filter(pos %in% c("x")) %>%
+    count(word) %>% arrange(desc(n))
+```
+
+```{r}
+pf_ratio <- unnested.pos %>%
+    filter(pos %in% c("n", "a", "d", "v")) %>%
+    count(group, word) %>%
+    filter(n > 1) %>%
+	spread(group, n, fill = 0) %>%
+    mutate(神ratio = (神隊友+1) / (sum(神隊友) + 1)) %>%
+    mutate(豬ratio = (豬隊友+1) / (sum(豬隊友) + 1)) %>%
+	mutate(logratio = log2(神ratio / 豬ratio)) %>%
+	arrange(desc(logratio))
+
+pf_ratio %>%
+	group_by(logratio > 0) %>%
+	top_n(20, abs(logratio)) %>%
+	ungroup() %>%
+	mutate(word = reorder(word, logratio)) %>%
+	ggplot(aes(word, logratio, fill = logratio < 0)) +
+	geom_bar(stat = "identity") +
+	coord_flip() +
+	ylab("神/豬 log ratio") +
+	scale_fill_manual(name = "", labels = c("神隊友", "豬隊友"),
+		values = c("tomato", "lightblue")) + th   
+```
+
+## Relative Frequency Ratio
+
+```{r}
+RFR <- unnested.pos %>%
+    filter(pos %in% c("n", "a", "d", "v")) %>%
+    count(group, word) %>%
+    filter(n > 1) %>%
+	spread(group, n, fill = 0) %>%
+    rename(A=神隊友, C=豬隊友) %>% 
+    mutate(B=sum(A)-A,
+           D=sum(C)-C,
+           RF = ((A+1)/(C+1))/((A+B)/(C+D)))
+
+RFR %>%
+    mutate(RF = log2(RF)) %>%
+	group_by(RF > 0) %>%
+	top_n(20, abs(RF)) %>%
+	ungroup() %>%
+	mutate(word = reorder(word, RF)) %>%
+	ggplot(aes(word, RF, fill = RF < 0)) +
+	geom_bar(stat = "identity") +
+	coord_flip() +
+	ylab("神/豬 Relative Frequency Ratio") +
+	scale_fill_manual(name = "", labels = c("神隊友", "豬隊友"),
+		values = c("tomato", "lightblue")) + th  
+```
+
+## Chi-square
+
+```{r}
+chi_df <- unnested.pos %>%
+    filter(pos %in% c("n", "a", "d", "v")) %>%
+    count(group, word) %>%
+    filter(n > 1) %>%
+	spread(group, n, fill = 0) %>%
+    rename(A=神隊友, C=豬隊友) %>%
+    mutate(B=sum(A)-A,
+           D=sum(C)-C,
+           N=A+B+C+D, 
+           chi2 = (A*D - B*C)^2 * N / ((A+C)*(A+B)*(B+D)*(C+D))) %>%
+    filter(chi2 > 6.64)
+
+chi_df %>%
+    arrange(desc(chi2)) %>%
+    mutate(word = reorder(word, chi2)) %>%
+    ggplot(aes(word, chi2)) +
+	geom_bar(stat = "identity") +
+	coord_flip() +
+	ylab("chi2") + 
+    theme_minimal() + th
+```
+
+```{r}
+library(tidytext)
+posts <- merged.df %>% select(plink, ptitle, pcontent) %>% filter(!duplicated(plink))
+unnested.pos %>%
+    filter(pos %in% c("n", "a", "d", "v")) %>% 
+    count(plink, word) %>%
+    bind_tf_idf(word, plink, n) %>% 
+    group_by(plink) %>%
+    arrange(-tf_idf) %>%
+    slice(1:15) %>%
+    ungroup() %>% 
+    left_join(posts, by="plink") %>% 
+    select(ptitle, pcontent, word) %>% View
+    count(word) %>% arrange(-n) %>% View
+```
